@@ -8,8 +8,9 @@ Run:   python selftest.py                 -> runs every check, exit 0 only if AL
 
 The code under test is located via env SELFTEST_ROOT (default: this file's directory). The mutation
 proof copies the sources to a temp tree, injects one defect per copy, sets SELFTEST_ROOT to the copy
-and expects a non-zero exit AND the named check to be among the FAILED lines. Live files are never
-written; their sha256 is asserted unchanged at the end of the proof.
+and expects a non-zero exit AND the named check to be among the NEW failures against an unmutated
+baseline copy that is asserted green first (rc 0, nothing failed). Live files are never written;
+their sha256 is asserted unchanged at the end of the proof.
 
 Independence: every reference value here is re-derived from the CONTRACT/textbook with math.erfc and
 numpy, never by calling the module that is being checked (no circular oracle).
@@ -257,6 +258,17 @@ def c01_degenerate_pricing_rules():
         pass
     else:
         raise AssertionError("non-broadcastable shapes must raise ValueError (the only raise)")
+
+
+@check
+def c01_usable_status_constant_and_helpers():
+    """R-14 B/G/H shared names. Expected values come from CONTRACT 2.3 (usable = newton, brent),
+    CONTRACT 1.2 (ACT/365) and the R-14 G dash mapping, never from the modules themselves."""
+    bsp, syn, dio, srf, viz = imp()
+    ensure(tuple(bsp.IV_STATUS_USABLE) == (0, 1), "[usable] IV_STATUS_USABLE %r != (0, 1) (CONTRACT 2.3)" % (bsp.IV_STATUS_USABLE,))
+    ensure(dio.DAYS_PER_YEAR == 365.0, "[days] DAYS_PER_YEAR %r != 365.0 (ACT/365, CONTRACT 1.2)" % (dio.DAYS_PER_YEAR,))
+    folded = dio.ascii_fold("a\u2013b\u2014c\u00e9")
+    ensure(folded == "a-b-c?", "[fold] ascii_fold(en dash, em dash, e-acute) = %r, expected 'a-b-c?' (R-14 G)" % folded)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -965,7 +977,7 @@ def c06_r13_ox2_viz_gaps_where_out_of_domain_noisy_chain():
         ensure((~dom).any() and dom.any(), "anti-vacuity: 0.8S must be mixed in/out of domain")
         ensure((np.isnan(y) == ~dom).all(), "%s: term y NaN pattern != ~in_domain (R13): NaN at %d, out-of-domain %d" % (method, int(np.isnan(y).sum()), int((~dom).sum())))
         ensure(np.allclose(y[dom], 100.0 * ts["iv"].to_numpy(float)[dom]), "in-domain term y != 100*iv")
-        # OX-2 smile: nearest-row domain at the first smile maturity
+        # OX-2 smile at the on-grid first maturity T0 = T_grid[0]: same domain definition as the grid (R-14 A)
         sm_tr = [t for t in data if str(t.name).startswith("Smile T=")]
         ensure(len(sm_tr) >= 1, "no smile traces")
         T0 = float(s.T_grid[0])
@@ -982,7 +994,7 @@ def c06_smile_slice():
     bsp, syn, dio, srf, viz = imp()
     s = clean_surface("spline")
     sm = srf.smile(s, 0.37)
-    ensure(list(sm.columns) == ["k", "strike", "iv"] and len(sm) == len(s.k_grid), "smile columns/len")
+    ensure(list(sm.columns) == ["k", "strike", "iv", "in_domain"] and len(sm) == len(s.k_grid), "smile columns/len")
     ensure(np.allclose(sm["strike"], s.params.forward(0.37) * np.exp(sm["k"])), "smile strike = F(T)*exp(k)")
     ensure(np.allclose(sm["iv"], s.evaluate(0.37, sm["k"].to_numpy())) and (np.diff(sm["k"]) > 0).all(), "smile iv / order")
     ensure(len(srf.smile(s, 0.37, n_k=11)) == 11, "smile n_k")
@@ -992,6 +1004,63 @@ def c06_smile_slice():
         pass
     else:
         raise AssertionError("smile(T<=0) must raise ValueError")
+
+
+@check
+def c06_in_domain_single_definition():
+    """R-14 A / REVIEW_B D13: ONE quoted-domain rule serves the in_domain grid, smile and term_structure,
+    on-grid AND off-grid. Order is deliberate: noisy chain first (it carries the anti-vacuity), and the
+    off-grid smile part [c-*] before the on-grid part [b], so a smile mask that ignores the domain is
+    caught by the off-grid noisy anti-vacuity [c-av] first. Every message carries a [tag]."""
+    bsp, syn, dio, srf, viz = imp()
+    cases = []
+    for label, setup in (("noisy", noisy_setup), ("clean", clean_setup)):
+        chain, params, quotes = setup()
+        for method in ("rbf", "spline"):
+            s = clean_surface(method) if label == "clean" else srf.build_surface(quotes, params, method=method)
+            cases.append((label, method, params, s))
+    for label, method, params, s in cases:
+        tag = "%s %s" % (method, label)
+        noisy = label == "noisy"
+        T_lo, T_hi = float(s.T_grid[0]), float(s.T_grid[-1])
+        # c. off-grid smiles vs the test's OWN recomputation from the REVIEW_A R9 text
+        sms = []
+        for T in (0.2, 0.37, 0.5):
+            ensure(T_lo < T < T_hi and float(np.min(np.abs(s.T_grid - T))) > 1e-6,
+                   "[c-offgrid %s] T=%r must lie strictly inside [%r, %r] and off every grid node" % (tag, T, T_lo, T_hi))
+            sm = srf.smile(s, T)
+            ensure(sm["in_domain"].dtype == bool, "[c-dtype %s T=%r] smile in_domain dtype %s != bool" % (tag, T, sm["in_domain"].dtype))
+            sms.append((T, sm))
+        if noisy:
+            ensure(any(bool((~sm["in_domain"].to_numpy(bool)).any()) for T, sm in sms),
+                   "[c-av %s] no off-grid smile (T=0.2, 0.37, 0.5) has an out-of-domain point: the off-grid mask is untested or forced True" % tag)
+        for T, sm in sms:
+            k = sm["k"].to_numpy(float)
+            own = (k >= np.interp(T, s.T_grid, s.k_lo)) & (k <= np.interp(T, s.T_grid, s.k_hi))
+            dom = sm["in_domain"].to_numpy(bool)
+            ensure(np.array_equal(own, dom), "[c-eq %s T=%r] smile in_domain != own R9 recomputation at %d of %d k" % (tag, T, int((own != dom).sum()), len(k)))
+            at = np.asarray(s.in_domain_at(T, k), dtype=bool)
+            ensure(np.array_equal(own, at), "[c-at %s T=%r] in_domain_at != own R9 recomputation at %d of %d k" % (tag, T, int((own != at).sum()), len(k)))
+        # a. the grid mask is the same definition at the nodes
+        ensure(np.array_equal(s.in_domain, s.in_domain_at(s.T_grid[:, None], s.k_grid[None, :])), "[a-eq %s] in_domain grid != in_domain_at(T_grid, k_grid)" % tag)
+        if noisy:
+            ensure(bool(s.in_domain.any()) and bool((~s.in_domain).any()), "[a-av %s] in_domain grid is not mixed True/False" % tag)
+        # b. on-grid smiles equal the grid rows
+        n_T = len(s.T_grid)
+        for i in (0, n_T // 2, n_T - 1):
+            got = srf.smile(s, float(s.T_grid[i]))["in_domain"].to_numpy(bool)
+            ensure(np.array_equal(got, s.in_domain[i]), "[b %s i=%d] smile(T_grid[i]) in_domain != in_domain[i] at %d k" % (tag, i, int((got != s.in_domain[i]).sum())))
+        # d. term structure uses the same definition at (T_i, k_i)
+        ts = srf.term_structure(s, 0.8 * params.S)
+        tdom = ts["in_domain"].to_numpy(bool)
+        ensure(np.array_equal(tdom, s.in_domain_at(s.T_grid, ts["k"].to_numpy())), "[d %s] term_structure in_domain != in_domain_at(T_grid, k_i)" % tag)
+        if noisy:
+            ensure(bool((~tdom).any()), "[d-av %s] 0.8S term structure has no out-of-domain maturity" % tag)
+        # e. outside the T range and NaN give False; positive controls make the False attributable to T
+        ensure(bool(s.in_domain_at(T_lo, 0.0)) and bool(s.in_domain_at(T_hi, 0.0)), "[e-ctrl %s] k=0 not in domain at the T edges" % tag)
+        ensure(not bool(s.in_domain_at(s.T_grid[-1] * 1.01, 0.0)), "[e-hiT %s] in_domain_at(T beyond T_grid[-1]) is True" % tag)
+        ensure(not bool(s.in_domain_at(s.T_grid[0] * 0.5, 0.0)), "[e-loT %s] in_domain_at(T before T_grid[0]) is True" % tag)
+        ensure(not bool(s.in_domain_at(float("nan"), 0.0)), "[e-nan %s] in_domain_at(NaN) is True" % tag)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -1239,7 +1308,7 @@ def run_checks(only=None):
 # ----------------------------------------------------------------------------------------------
 # mutation proof: every mutation is applied to a TEMP COPY; live hashes asserted unchanged
 # ----------------------------------------------------------------------------------------------
-# (name, file, regex, replacement, count_expected_min, checks that MUST be among the FAILED lines)
+# (name, file, regex, replacement, checks of which at least one MUST be among the NEW failures vs the green baseline)
 MUTATION_TABLE = [
     # (name, file, regex, replacement, checks of which at least one MUST be red)
     ("q_sign_in_d1", "bs_pricing.py", r"\(r - q \+ 0\.5 \* sigma \* sigma\) \* Tc\) / vol_safe", "(r + q + 0.5 * sigma * sigma) * Tc) / vol_safe",
@@ -1254,14 +1323,18 @@ MUTATION_TABLE = [
      ["c05_butterfly_independent_recount_and_injection"]),
     ("calendar_mask_removed_scope", "surface.py", r"cal_mask = ind\[:-1, :\] & ind\[1:, :\]", "cal_mask = np.ones_like(dw, dtype=bool)",
      ["c05_calendar_clean_truth_zero_and_injected_detected", "c05_arbitrage_report_format_and_wording"]),
-    ("in_domain_old_union_rule", "surface.py", r"in_domain = \(k >= surface\.k_lo\) & \(k <= surface\.k_hi\)", "in_domain = (k >= surface.k_grid[0]) & (k <= surface.k_grid[-1])",
-     ["c06_r10_in_domain_false_case_reachable_noisy_chain", "c06_term_structure_per_maturity_mapping"]),
+    ("in_domain_old_union_rule", "surface.py", r"return \(T >= T_nodes\[0\]\) & \(T <= T_nodes\[-1\]\) & \(k >= lo\) & \(k <= hi\)", "return (T >= T_nodes[0]) & (T <= T_nodes[-1]) & (k >= np.min(k_lo)) & (k <= np.max(k_hi))",
+     ["c06_r10_in_domain_false_case_reachable_noisy_chain", "c06_term_structure_per_maturity_mapping", "c06_in_domain_single_definition"]),
     ("iv_returns_seed_value", "bs_pricing.py", r"iv\[idx\[done\]\] = sig\[done\]", "iv[idx[done]] = np.sqrt(2.0 * math.pi / ts[done]) * ps[done] / (ss[done] * np.exp(-qs[done] * ts[done]))",
      ["c02_iv_round_trip_clean_chain"]),
-    ("viz_term_nan_mask_removed", "viz.py", r"y_pct = np\.where\(in_dom, 100\.0 \* ts\[\"iv\"\]\.to_numpy\(float\), np\.nan\)", "y_pct = 100.0 * ts[\"iv\"].to_numpy(float)",
+    ("viz_term_nan_mask_removed", "viz.py", r"y_pct = _masked_pct\(ts\)", "y_pct = 100.0 * ts[\"iv\"].to_numpy(float)",
      ["c06_r13_ox2_viz_gaps_where_out_of_domain_noisy_chain"]),
-    ("viz_smile_nan_mask_removed", "viz.py", r"y_smile = np\.where\(dom, 100\.0 \* sm\[\"iv\"\]\.to_numpy\(float\), np\.nan\)", "y_smile = 100.0 * sm[\"iv\"].to_numpy(float)",
+    ("viz_smile_nan_mask_removed", "viz.py", r"y_smile = _masked_pct\(sm\)", "y_smile = 100.0 * sm[\"iv\"].to_numpy(float)",
      ["c06_r13_ox2_viz_gaps_where_out_of_domain_noisy_chain"]),
+    ("viz_masked_pct_helper_mask_removed", "viz.py", r"return np\.where\(df\[\"in_domain\"\]\.to_numpy\(bool\), 100\.0 \* df\[\"iv\"\]\.to_numpy\(float\), np\.nan\)", "return 100.0 * df[\"iv\"].to_numpy(float)",
+     ["c06_r13_ox2_viz_gaps_where_out_of_domain_noisy_chain"]),
+    ("smile_in_domain_column_all_true", "surface.py", r"\"in_domain\": surface\.in_domain_at\(Tf, k\),", "\"in_domain\": np.ones(len(k), bool),",
+     ["c06_in_domain_single_definition"]),
     ("hover_drops_expiry", "viz.py", r"<br>Expiry: %\{customdata\[2\]\}", "<br>Exp: %{customdata[2]}",
      ["c07_dashboard_contract_from_fig_dict", "c07_write_dashboard_file"]),
     ("surface_z_in_decimals", "viz.py", r"Z = 100\.0 \* np\.asarray\(surface\.iv, float\)\.T", "Z = 1.0 * np.asarray(surface.iv, float).T",
@@ -1307,6 +1380,10 @@ def mutation_proof():
         copy_tree(b)
         rc0, failed0, _ = run_selftest_in(b)
         print("BASELINE copy: rc=%d failed=%s" % (rc0, failed0))
+        if rc0 != 0 or failed0:      # a red baseline makes every RED unattributable (REVIEW_B D12)
+            print("BASELINE copy is NOT green -> no RED can be attributed; proof invalid")
+            bad += 1
+            table = []
         for name, fname, pattern, repl, must_fail in table:
             dst = os.path.join(base, name)
             copy_tree(dst)
@@ -1328,7 +1405,7 @@ def mutation_proof():
             open(p, "w", encoding="utf-8", newline="").write(new)
             rc, failed, out = run_selftest_in(dst)
             new_red = [x for x in failed if x not in failed0]
-            hit = [c for c in must_fail if c in failed]
+            hit = [c for c in must_fail if c in new_red]       # credit only NEW failures (D12)
             verdict = "RED as required" if (rc != 0 and hit) else "NOT CAUGHT"
             if not must_fail:
                 verdict = "INFO (no red required; shows a second guard masks this mutation alone)"

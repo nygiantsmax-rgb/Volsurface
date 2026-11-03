@@ -32,7 +32,8 @@ import plotly.colors as pc
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from bs_pricing import IV_STATUS_NEWTON, IV_STATUS_BRENT
+from bs_pricing import IV_STATUS_USABLE
+from data_io import DAYS_PER_YEAR
 from surface import smile, term_structure
 
 _VALID_X_AXIS = ("k", "strike")
@@ -51,7 +52,7 @@ def _expiry_label(params, T):
     vd = getattr(params, "valuation_date", None)
     if vd is None:
         return "T=%.3fy" % float(T)
-    return (vd + datetime.timedelta(days=int(round(float(T) * 365.0)))).isoformat()
+    return (vd + datetime.timedelta(days=int(round(float(T) * DAYS_PER_YEAR)))).isoformat()
 
 
 def _customdata(params, K, T, iv_pct, k):
@@ -60,7 +61,7 @@ def _customdata(params, K, T, iv_pct, k):
                                           np.asarray(iv_pct, float), np.asarray(k, float))
     out = np.empty(K.shape + (5,), dtype=object)
     out[..., 0] = K
-    out[..., 1] = T * 365.0
+    out[..., 1] = T * DAYS_PER_YEAR
     labels = np.empty(T.shape, dtype=object)
     for idx in np.ndindex(T.shape):
         labels[idx] = _expiry_label(params, T[idx])
@@ -101,8 +102,9 @@ def build_dashboard(surface, quotes, params, colorscale="Viridis", x_axis="k",
         raise ValueError("n_smiles must be >= 1")
     by_strike = x_axis == "strike"
     y_title = _STRIKE_TITLE if by_strike else _K_TITLE
+    xlab = "Strike" if by_strike else "k"
 
-    usable = quotes[quotes["status"].isin([IV_STATUS_NEWTON, IV_STATUS_BRENT])]
+    usable = quotes[quotes["status"].isin(IV_STATUS_USABLE)]
     if len(usable) == 0:
         raise ValueError("no quotes with a finite IV (status 0/1); nothing to overlay")
 
@@ -138,14 +140,15 @@ def build_dashboard(surface, quotes, params, colorscale="Viridis", x_axis="k",
     qT = usable["T"].to_numpy(float)
     qk = usable["k"].to_numpy(float)
     qiv = 100.0 * usable["iv"].to_numpy(float)
-    fig.add_trace(go.Scatter3d(x=qT, y=qK if by_strike else qk, z=qiv, mode="markers",
+    qx = qK if by_strike else qk
+    fig.add_trace(go.Scatter3d(x=qT, y=qx, z=qiv, mode="markers",
                                name="Market quotes",
                                marker=dict(size=2.5, color="black", opacity=0.8),
                                customdata=_customdata(params, qK, qT, qiv, qk),
                                hovertemplate=_HOVER), row=1, col=1)
 
     # ---- smiles: pairs of (line, markers) --------------------------------------------------
-    dropped = tuple(getattr(surface, "dropped_T", ()))
+    dropped = tuple(surface.dropped_T)
     Tq = np.unique(qT)
     Tq = np.array([t for t in Tq if not any(np.isclose(t, d) for d in dropped)])
     if len(Tq) == 0:
@@ -155,25 +158,19 @@ def build_dashboard(surface, quotes, params, colorscale="Viridis", x_axis="k",
     for T in smile_Ts:
         sm = smile(surface, float(T))
         xs = sm["strike"].to_numpy(float) if by_strike else sm["k"].to_numpy(float)
-        # OX-2 (R13 principle): smile k nodes outside the quoted domain are y = NaN (gap), never an
-        # extrapolated value. Domain = Surface.in_domain at the grid row nearest this maturity; smile()
-        # with n_k=None returns k_grid, so its columns align with that row.
-        i_row = int(np.argmin(np.abs(T_grid - float(T))))
-        dom = np.asarray(surface.in_domain[i_row], bool)
-        if len(dom) != len(sm):
-            raise ValueError("smile length %d != in_domain row length %d" % (len(sm), len(dom)))
-        y_smile = np.where(dom, 100.0 * sm["iv"].to_numpy(float), np.nan)
+        # OX-2 (R13 principle): out-of-domain smile points are NaN (gap), never an extrapolated value.
+        y_smile = _masked_pct(sm)
         i_line = len(fig.data)
         fig.add_trace(go.Scatter(x=xs, y=y_smile, mode="lines",
                                  name="Smile T=%.3fy" % T, visible=False,
                                  hovertemplate="%s=%%{x:.4f}<br>IV: %%{y:.2f}%%<extra>T=%.3fy</extra>"
-                                 % ("Strike" if by_strike else "k", T)), row=2, col=1)
+                                 % (xlab, T)), row=2, col=1)
         m = np.isclose(qT, T)
-        fig.add_trace(go.Scatter(x=(qK[m] if by_strike else qk[m]), y=qiv[m], mode="markers",
+        fig.add_trace(go.Scatter(x=qx[m], y=qiv[m], mode="markers",
                                  name="Quotes T=%.3fy" % T, visible=False,
                                  marker=dict(size=6, color="black", symbol="diamond"),
                                  hovertemplate="%s=%%{x:.4f}<br>IV: %%{y:.2f}%%<extra>market T=%.3fy</extra>"
-                                 % ("Strike" if by_strike else "k", T)), row=2, col=1)
+                                 % (xlab, T)), row=2, col=1)
         smile_trace_idx.append((i_line, i_line + 1))
 
     # ---- term structures --------------------------------------------------------------------
@@ -188,13 +185,13 @@ def build_dashboard(surface, quotes, params, colorscale="Viridis", x_axis="k",
     for a, b in smile_trace_idx:
         base[a] = base[b] = False
     steps = []
-    for i, (T, (a, b)) in enumerate(zip(smile_Ts, smile_trace_idx)):
+    for T, (a, b) in zip(smile_Ts, smile_trace_idx):
         vis = list(base)
         vis[a] = vis[b] = True
         steps.append(dict(method="restyle", args=[{"visible": vis}], label="T=%.3fy" % T))
-        if i == 0:                                   # initial state = first smile shown
-            for j, v in enumerate(vis):
-                fig.data[j].visible = v
+    if steps:                                        # initial state = first smile shown
+        for j, v in enumerate(steps[0]["args"][0]["visible"]):
+            fig.data[j].visible = v
     sliders = [dict(active=0, steps=steps, x=0.0, len=0.5, y=-0.04,
                     currentvalue=dict(prefix="Smile expiry: "))]
 
@@ -213,19 +210,22 @@ def build_dashboard(surface, quotes, params, colorscale="Viridis", x_axis="k",
         sliders=sliders, updatemenus=updatemenus,
         height=1000, margin=dict(l=40, r=40, t=80, b=80), legend=dict(font=dict(size=10)),
     )
-    fig.update_xaxes(title_text=("Strike" if by_strike else _K_TITLE), row=2, col=1)
+    fig.update_xaxes(title_text=y_title, row=2, col=1)
     fig.update_yaxes(title_text="Implied volatility (%)", row=2, col=1)
     fig.update_xaxes(title_text="Time to maturity (years)", row=2, col=2)
     fig.update_yaxes(title_text="Implied volatility (%)", row=2, col=2)
     return fig
 
 
+def _masked_pct(df):
+    """IV in percent with out-of-domain points NaN (R13/OX-2, R-14 A): one mask for both panels."""
+    return np.where(df["in_domain"].to_numpy(bool), 100.0 * df["iv"].to_numpy(float), np.nan)
+
+
 def _add_term(fig, ts, name, dash=None):
     """Add one term-structure trace (x = T years, y = IV percent); out-of-domain points are NaN, a gap in the line (R13)."""
-    in_dom = ts["in_domain"].to_numpy(bool)
-    # R13: out-of-domain points (in_domain False, from term_structure, not recomputed here) are y = NaN,
-    # i.e. a gap in the line, never an extrapolated value presented as a market fact.
-    y_pct = np.where(in_dom, 100.0 * ts["iv"].to_numpy(float), np.nan)
+    # R13: out-of-domain points are a gap in the line, never an extrapolated value presented as a market fact.
+    y_pct = _masked_pct(ts)
     fig.add_trace(go.Scatter(
         x=ts["T"].to_numpy(float), y=y_pct, mode="lines+markers",
         name=name, line=dict(dash=dash) if dash else None,
@@ -256,6 +256,7 @@ def _selftest():
     """Tiny structural self-check on a synthetic Surface-like object; exits non-zero on failure."""
     import pandas as pd
     from types import SimpleNamespace
+    from surface import _in_domain
 
     class _P:
         S = 100.0
@@ -282,6 +283,8 @@ def _selftest():
                          evaluate=_eval,
                          k_lo=np.full(5, -0.3), k_hi=np.full(5, 0.3),
                          in_domain=np.ones((5, 7), bool))   # R9/R10 fields
+    # smile()/term_structure() call surface.in_domain_at: same _in_domain semantics as the real Surface
+    sf.in_domain_at = lambda T, k: _in_domain(T_grid, sf.k_lo, sf.k_hi, T, k)
     q = pd.DataFrame({"strike": [95.0, 105.0], "T": [0.1, 0.55], "type": ["P", "C"],
                       "price": [1.0, 2.0], "F": [100.2, 101.1], "k": [-0.05, 0.04],
                       "iv": [0.2, 0.21], "w": [0.004, 0.024], "status": [0, 1]})

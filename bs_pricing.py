@@ -10,7 +10,7 @@ bs_vega(S, K, T, r, q, sigma)                -> ndarray   (section 3.2, per 1.00
 price_bounds(S, K, T, r, q, is_call)         -> (lower, upper)   (section 3.3)
 implied_vol(price, S, K, T, r, q, is_call, tol, max_iter, sigma_lo, sigma_hi)
                                              -> (iv, status)     (section 3.4)
-Constants: IV_STATUS_* (ints), IV_STATUS_NAMES, IV_MIN, IV_MAX, BOUND_EPS.
+Constants: IV_STATUS_* (ints), IV_STATUS_NAMES, IV_STATUS_USABLE, IV_MIN, IV_MAX, BOUND_EPS.
 
 Error semantics (CONTRACT 9): only non-broadcastable shapes raise ValueError; NaN / non-finite
 in any input gives NaN out; implied_vol never raises for bad quotes (NaN + status code).
@@ -36,6 +36,7 @@ IV_STATUS_OUT_OF_BOUNDS = 2
 IV_STATUS_FAILED = 3
 IV_STATUS_INVALID_INPUT = 4
 IV_STATUS_NAMES = {0: "newton", 1: "brent", 2: "out_of_bounds", 3: "failed", 4: "invalid_input"}
+IV_STATUS_USABLE = (IV_STATUS_NEWTON, IV_STATUS_BRENT)  # statuses with a finite iv (CONTRACT 2.3); the one definition (R-14 B)
 IV_MIN = 1e-4
 IV_MAX = 5.0
 BOUND_EPS = 1e-10  # absolute, price units
@@ -81,6 +82,11 @@ def _d1_d2(S, K, Tc, r, q, sigma, vol_safe):
     return d1, d1 - vol_safe
 
 
+def _disc(x, rate, Tc):
+    """x * exp(-rate * Tc): the one discounting expression (R-14 J)."""
+    return x * np.exp(-rate * Tc)
+
+
 def bs_price(S, K, T, r, q, sigma, is_call):
     """European Black-Scholes price with continuous dividend yield (CONTRACT 3.1).
 
@@ -99,8 +105,8 @@ def bs_price(S, K, T, r, q, sigma, is_call):
         vol = sigma * np.sqrt(Tc)
         degenerate = (T <= 0) | (sigma <= 0) | ~(vol >= _VOL_DEGENERATE)
         vol_safe = np.where(degenerate, 1.0, vol)
-        dS = S * np.exp(-q * Tc)
-        dK = K * np.exp(-r * Tc)
+        dS = _disc(S, q, Tc)
+        dK = _disc(K, r, Tc)
         d1, d2 = _d1_d2(S, K, Tc, r, q, sigma, vol_safe)
         call = dS * ndtr(d1) - dK * ndtr(d2)
         put = dK * ndtr(-d2) - dS * ndtr(-d1)
@@ -125,7 +131,7 @@ def bs_vega(S, K, T, r, q, sigma):
         degenerate = (T <= 0) | (sigma <= 0) | ~(vol >= _VOL_DEGENERATE)
         vol_safe = np.where(degenerate, 1.0, vol)
         d1, _ = _d1_d2(S, K, Tc, r, q, sigma, vol_safe)
-        vega = S * np.exp(-q * Tc) * _INV_SQRT_2PI * np.exp(-0.5 * d1 * d1) * sqT
+        vega = _disc(S, q, Tc) * _INV_SQRT_2PI * np.exp(-0.5 * d1 * d1) * sqT
         vega = np.where(degenerate, 0.0, vega)
         vega = np.where(invalid, np.nan, vega)
     return np.asarray(vega, dtype=np.float64)
@@ -141,8 +147,8 @@ def price_bounds(S, K, T, r, q, is_call):
     invalid = ~_finite_all(S, K, T, r, q) | (S <= 0) | (K <= 0)
     with np.errstate(all="ignore"):
         Tc = np.maximum(T, 0.0)
-        dS = S * np.exp(-q * Tc)
-        dK = K * np.exp(-r * Tc)
+        dS = _disc(S, q, Tc)
+        dK = _disc(K, r, Tc)
         lower = np.where(isc, np.maximum(dS - dK, 0.0), np.maximum(dK - dS, 0.0))
         upper = np.where(isc, dS, dK)
         lower = np.where(invalid, np.nan, lower)

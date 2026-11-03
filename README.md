@@ -128,7 +128,8 @@ Exit code 0 alone is not enough. Check all of these.
    denominator. There is no pass/fail wording and no threshold.
 4. Open the HTML. The 3D surface and quote markers should render. Term-structure lines should show gaps
    (not lines) where the strike falls outside the quoted range at that maturity (R13). Smile lines show gaps
-   outside the quoted range at that maturity (OX-2, with the D13 limit in section 7).
+   outside the quoted range at that maturity (OX-2). They use the same domain rule as the grid and the term
+   structure (D13 closed, R-14 A). At a quoted maturity between grid rows the edge can be off by 0 or 1 node (D14, section 7).
 5. The control totals run inside `main.py` as asserts and stop the run with exit 1 if broken. They are
    disabled by `python -O`; do not run with `-O`.
 
@@ -152,7 +153,11 @@ python oracle_check.py --src PATH_TO_SOURCES --sections calib,bs,synth,surface
 - `--mutation-proof` copies the sources to a temp folder, injects one defect per copy, and requires the named
   check to turn red. It never writes live files and asserts the live hashes are unchanged. Before trusting
   it, find the line `BASELINE copy: rc=0 failed=[]` in its output and the line
-  `live source hashes unchanged after proof: OK`. Without the baseline line a RED is not attributable (D12, section 7).
+  `live source hashes unchanged after proof: OK`. If the baseline is not green the proof prints
+  `BASELINE copy is NOT green -> no RED can be attributed; proof invalid` and counts that as a failure. A mutation
+  is credited RED only if its required check is among the failures NEW against the baseline (D12, closed).
+  Each mutation prints a line `MUTATION <name> applied xN  rc=...  new_red=[...] -> RED as required`. The hub's last run
+  gave 16 RED as required, 1 INFO and 0 NOT CAUGHT.
 - `oracle_check.py` (ORACLE): an independent Black-Scholes, IV and surface oracle written from the spec. It
   ends with `--- summary: N checks, K FAIL ---`, one `FAIL id owner=...` line per failure, and exits 0 or 1
   (2 for an unknown `--sections` name). It prints sha256 of the sources before and checks that they are unchanged.
@@ -185,6 +190,12 @@ RBF (thin-plate spline) is the default; `--method spline` is also available. The
 uses per-maturity k = ln(K/F(T_i)). Quoted-domain bounds per maturity are `k_lo`, `k_hi` and a boolean
 `in_domain` on the surface; the arbitrage diagnostics count only in-domain nodes. Maturities with fewer than 4
 usable quotes are dropped and listed.
+
+The quoted domain has one definition (R-14 A): `surface._in_domain`, exposed as `Surface.in_domain_at(T, k)`.
+It is True where T lies in [T_grid[0], T_grid[-1]] and k lies between `k_lo` and `k_hi` interpolated linearly in T;
+NaN gives False. The grid mask, `smile()`, `term_structure()` and the dashboard's gap mask (`viz._masked_pct`) all
+use it. `smile(surface, T)` returns a DataFrame with columns `[k, strike, iv, in_domain]`; `in_domain` is a bool and
+is False outside the quoted range at that T (`surface.py` lines 435-459).
 
 ## 6. Limitations
 
@@ -235,7 +246,7 @@ quotes. Do not compare them with the near-zero synthetic counts: the synthetic c
 6.7 Smaller points. Synthetic truth is an SSVI surface; its arbitrage-free claim is a text claim backed by the
 hand-checked conditions in the `synthetic.py` docstring, not by the surface diagnostics. Time is ACT/365. The loader accepts only single-line CSV records.
 
-## 7. Open items (REVIEW_B sections 4 and 5, status as of the delta pass)
+## 7. Open items (REVIEW_B sections 4 to 6, status as of the R-14 simplify delta pass)
 
 | ID | Status | Owner | What is open |
 |---|---|---|---|
@@ -244,30 +255,34 @@ hand-checked conditions in the `synthetic.py` docstring, not by the surface diag
 | OX-4 | ACCEPTED GAP | none | vertical-spread bound unchecked (6.2) |
 | OX-5 | observed once, not verified | none in v1 | `dividendYield` unit assumption (percent) is unverified recall. One live run gave q = 0.0075, in range, which cannot settle it; which branch produced q was not reported. A field already in decimal and divided by 100 would also land in range. Read the printed q on every `--ticker` run |
 | D9 | OPEN, deferred | QA | no test detects a parity-priced put; R6 rests on the oracle's direct-formula comparison and on reading |
-| D12 | OPEN | QA | mutation proof takes "caught" from the mutated run's failed list, not from failures new against the baseline, and never asserts the baseline was green. Check the `BASELINE copy: rc=0 failed=[]` line by hand |
-| D13 | OPEN | BUILD-C | smile mask uses the nearest grid row's domain, not the maturity's own quotes. Hand estimate: at T = 9/12 an extrapolated node may be drawn as data, 0 or 1 node per edge (REVIEW_B). The existing check tests only the exact-grid slice |
+| D12 | CLOSED (R-14 simplify delta, REVIEW_B section 6 point 4) | QA | the mutation proof now aborts as "proof invalid" on a non-green baseline and credits RED only from failures new against the baseline (`selftest.py` lines 1383-1386 and 1407-1409) |
+| D13 | CLOSED (R-14 A, REVIEW_B section 6 point 1) | BUILD-B | one domain definition: `surface._in_domain`, exposed as `Surface.in_domain_at`. The grid mask, `smile()` and `term_structure()` all call it, so the smile mask no longer borrows the nearest grid row. Residual: D14 |
+| D14 | OPEN, MINOR | BUILD-B if adopted | at a quoted maturity that lies between grid rows, the smile's domain edge is interpolated from the grid-row edges, not taken from the slice's own quoted extent. It can differ by 0 or 1 node per edge (`surface.py` lines 94-95 and 136). Hub measurement over 32 quoted-maturity slices (default and clean chains, rbf and spline): the forbidden direction (an extrapolated point drawn as data) occurred 0 times; only the conservative direction (up to 2 in-quote points hidden) occurred. Proposed fix: pass the quoted maturities and their edges to `_in_domain` |
+| D15 | OPEN, MINOR | QA | the `c06_in_domain_single_definition` off-grid assertion checks conformance to R-14 (grid-sampled edges), not to the REVIEW_A R9 text, although its comment and messages say "R9 text" (`selftest.py` lines 1026-1043). Fix: relabel it as R-14 conformance |
 | D7 test half | OPEN | QA | the params line is printed first (code closed), but no selftest asserts that ordering |
 | D2, D8 | not re-read in the delta pass | BUILD-B | comment-only fixes were reported by the hub; REVIEW_B did not claim them closed |
 
-OX-2 (smile gaps) and D1, D3 to D6, D10 are recorded CLOSED in REVIEW_B section 5 (D4 conditional on D12). D11 needed no fix.
+OX-2 (smile gaps) and D1, D3 to D6, D10 are recorded CLOSED in REVIEW_B section 5. D4 was closed on the condition that D12 closed; REVIEW_B section 6 records D12 closed, so D4 is CLOSED unconditionally. D11 needed no fix.
 
 ## 8. Documentation versus behavior (findings)
 
 - CONTRACT 3.4 (price-only acceptance) is not what is built. The rulings R-1 and R-2 govern (section 4). CONTRACT.md was
   deliberately not edited, so any copy of it is stale against R-1 to R-9.
-- RESOLVED by a hub run. The ORACLE lane's own clean result was recorded against earlier bytes (synthetic 73ee05b0,
-  data_io 3f0a1939, surface af6a5f38). The hub then ran `python -W error oracle_check.py` on 2026-11-02 on the final tree
-  (bs_pricing 12deadc4, synthetic 1414ff07, data_io 589f5c78, surface be111b3e, viz edc7196f, main 900228c8,
-  selftest 34fbf338, oracle_check e44e67b8) and got exit 0 (PowerShell `$LASTEXITCODE`). That is a hub-run fact, not
-  something this README's author observed. Re-run it yourself after any source change.
-- Source hashes recorded by QA (sha256 prefixes): bs_pricing 12deadc4, synthetic 1414ff07, data_io 589f5c78,
-  surface be111b3e, viz edc7196f, main 900228c8, requirements 60d0c169, selftest 34fbf338. Run
-  `python selftest.py --hashes` and compare. A difference means the file changed after those runs.
-- RESOLVED by a hub run. QA's log said the mutation table was not fully re-run after its last edit. The hub then ran
-  `python selftest.py --mutation-proof` on the same final bytes, after that edit: exit 0, it printed
-  `BASELINE copy: rc=0 failed=[]`, 14 mutations were RED as required, 1 was INFO (`iv_price_only_alone_vega_guard_masks`),
-  and live hashes were unchanged before and after. D12 stays open as a test-design issue: the baseline line is printed
-  but not asserted, so read it by hand.
+- Oracle result, as of the R-14 simplify round. The hub's S7 gate ran `oracle_check.py` on the final tree and recorded
+  108 checks and 0 FAIL, and `selftest.py` at 40 of 40 (`RESULT: all 40 checks passed ...`; 40 is the count of
+  `@check` functions in `selftest.py`). The README's author could not run commands and did not observe these runs;
+  the 108 comes from the hub's gate record, not from this author. The earlier ship-state run (commit dcf5428) recorded
+  a different byte set; those hashes are superseded. Re-run `python oracle_check.py` yourself after any source change
+  and read the line `--- summary: N checks, K FAIL ---`.
+- Source hashes recorded by the hub S7 gate (sha256 prefixes, identical on run n and run n+1): bs_pricing 45346d20,
+  synthetic 1414ff07, data_io 8f946e4a, surface 1a76c666, viz 05a69087, main c6dbc436, requirements 60d0c169,
+  selftest 64c82b3d, oracle_check e44e67b8. Run `python selftest.py --hashes` and compare. A difference means the
+  file changed after those runs. The author did not compute these hashes.
+- Mutation proof, same gate and bytes: exit 0, it printed `BASELINE copy: rc=0 failed=[]`, 16 mutations were RED
+  as required, 1 was INFO (`iv_price_only_alone_vega_guard_masks`), 0 were NOT CAUGHT, and live hashes were unchanged
+  before and after. The baseline is now asserted by the code (D12 closed, section 7), not only printed.
+- REVIEW_B section 6 (R-14 simplify delta) is the reviewer's as-built read of these bytes: D13, D12 and D4 closed,
+  no MAJOR, new MINOR items D14 and D15. REVIEW_B did not run code; its execution evidence is the hub's gate record.
 - Price-only acceptance alone is not caught by the mutation proof because the vega >= 1e-8 guard masks it (listed as an INFO row).
   Only the pair of mutations goes red. That is defense in depth, not a hole.
 - `--ticker` silently ignores `--spot` and `--div`; no note is printed.
@@ -277,7 +292,7 @@ OX-2 (smile gaps) and D1, D3 to D6, D10 are recorded CLOSED in REVIEW_B section 
   `oracle_check.py` prints a line `REVIEW_A.md present at ...: False` there; that is informational.
 - The CSV control total counts non-blank lines, so a quoted field with an embedded newline makes it fail on a valid file.
   It fails closed (exit 1) and is also an `assert` (off under `-O`).
-- `main.py` line 6 (a usage example in its docstring) and `selftest.py` line 1184 name a ticker symbol. This README does not.
+- `main.py` line 6 (a usage example in its docstring) and `selftest.py` line 1253 name a ticker symbol. This README does not.
 
 ## 9. Recovery
 
@@ -290,7 +305,9 @@ on the first run to keep a reproducible input.
 
 ## 10. Known failure messages
 
-Errors go to stderr, ASCII only.
+Errors go to stderr, ASCII only. Console and error text pass through `data_io.ascii_fold` (R-14 G): en and em dashes
+become "-" and any other non-ASCII character becomes "?". This includes the text of yfinance errors that
+`fetch_yfinance_chain` wraps (`data_io.py` line 372; `main.py` lines 47 and 192 call it).
 
 | Text | Exit | Cause and action |
 |---|---|---|

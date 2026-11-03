@@ -9,6 +9,8 @@ MarketParams            frozen dataclass: S, r, q, valuation_date; the ONLY defi
 load_chain_csv(path, params=None) -> (chain, rejects)
 fetch_yfinance_chain(ticker, ...) -> (chain, MarketParams)    optional, network, opt-in only
 CHAIN_COLUMNS, REJECT_COLUMNS, REJECT_REASONS                 schema constants
+DAYS_PER_YEAR                                                 365.0, the ACT/365 day count (R-14 H)
+ascii_fold(text) -> str                                       console/error text folded to ASCII (R-14 G)
 
 Units (CONTRACT 1.2): T in years ACT/365, r and q continuous annual DECIMALS, prices per
 share. No percent appears anywhere in this module.
@@ -33,6 +35,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+
+DAYS_PER_YEAR = 365.0  # ACT/365 (CONTRACT 1.2); the one definition (R-14 H)
 
 # Column order of a CHAIN frame (CONTRACT 2.1). sigma_true is appended only if present.
 CHAIN_COLUMNS = ("strike", "T", "type", "price")
@@ -139,7 +143,7 @@ def _classify_row(rec, use_T, params):
         exp = _parse_iso_date(rec["expiry"])
         if exp is None:
             return "bad_date"
-        T = (exp - params.valuation_date).days / 365.0
+        T = (exp - params.valuation_date).days / DAYS_PER_YEAR
     if strike <= 0.0 or price <= 0.0 or T <= 0.0:
         return "non_positive"
     sig = None
@@ -256,8 +260,9 @@ def load_chain_csv(path, params=None):
 # ---------------------------------------------------------------------------
 # yfinance adapter (optional; network; only via --ticker)
 # ---------------------------------------------------------------------------
-def _ascii(msg):
-    return str(msg).encode("ascii", "replace").decode("ascii")
+def ascii_fold(text):
+    """Fold to ASCII for console and error text: en/em dash map to '-', anything else non-ASCII to '?' (one helper, R-14 G)."""
+    return str(text).replace("\u2013", "-").replace("\u2014", "-").encode("ascii", "replace").decode("ascii")
 
 
 Q_MAX = 0.25  # REVIEW_A R2: a q outside [0, Q_MAX] is never used
@@ -337,7 +342,7 @@ def fetch_yfinance_chain(ticker, max_expiries=8, min_days=7, risk_free_rate=0.04
         parts = []
         for exp in usable:
             oc = tk.option_chain(exp.isoformat())
-            T = (exp - val).days / 365.0
+            T = (exp - val).days / DAYS_PER_YEAR
             for frame, typ in ((oc.calls, "C"), (oc.puts, "P")):
                 if frame is None or len(frame) == 0:
                     continue
@@ -364,8 +369,8 @@ def fetch_yfinance_chain(ticker, max_expiries=8, min_days=7, risk_free_rate=0.04
         chain = chain.sort_values(["T", "strike", "type"], kind="mergesort").reset_index(drop=True)
         return chain, params
     except Exception as exc:  # converted per CONTRACT 9, never swallowed
-        raise RuntimeError(_ascii("fetch_yfinance_chain(%s) failed: %s: %s"
-                                  % (ticker, type(exc).__name__, exc))) from exc
+        raise RuntimeError(ascii_fold("fetch_yfinance_chain(%s) failed: %s: %s"
+                                    % (ticker, type(exc).__name__, exc))) from exc
 
 
 # ---------------------------------------------------------------------------

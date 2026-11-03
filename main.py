@@ -26,9 +26,9 @@ import webbrowser
 
 import numpy as np
 
-from bs_pricing import IV_STATUS_NAMES, IV_STATUS_NEWTON, IV_STATUS_BRENT
-from synthetic import generate_chain, DEFAULT_S, DEFAULT_R, DEFAULT_Q
-from data_io import MarketParams, load_chain_csv, fetch_yfinance_chain
+from bs_pricing import IV_STATUS_NAMES, IV_STATUS_USABLE
+from synthetic import generate_chain, DEFAULT_S, DEFAULT_Q
+from data_io import MarketParams, load_chain_csv, fetch_yfinance_chain, ascii_fold
 from surface import prepare_quotes, build_surface, arbitrage_report
 from viz import build_dashboard, write_dashboard
 
@@ -43,13 +43,8 @@ EXIT_INPUT = 2
 EXIT_SURFACE = 3
 
 
-def _ascii(text):
-    """Fold to ASCII for the console (map, never crash)."""
-    return str(text).replace("–", "-").replace("—", "-").encode("ascii", "replace").decode("ascii")
-
-
 def _err(msg):
-    print(_ascii(msg), file=sys.stderr)
+    print(ascii_fold(msg), file=sys.stderr)
 
 
 def _build_parser():
@@ -171,7 +166,7 @@ def _run(args):
     counts = {code: int(np.sum(status == code)) for code in sorted(IV_STATUS_NAMES)}
     assert len(quotes) == expected, "control total 2 broken: %d quotes vs %d OTM chain rows" % (len(quotes), expected)
     assert sum(counts.values()) == len(quotes), "control total 2 broken: status counts do not sum to len(quotes)"
-    ok = np.isin(status, (IV_STATUS_NEWTON, IV_STATUS_BRENT))
+    ok = np.isin(status, IV_STATUS_USABLE)
     assert np.array_equal(ok, np.isfinite(quotes["iv"].to_numpy(float))), \
         "control total 4 broken: iv finite <=> status in {0,1} violated"
     print("quotes: %d OTM rows | status: %s" % (
@@ -183,7 +178,7 @@ def _run(args):
         _err("build_surface failed: %s" % exc)
         return EXIT_SURFACE
     dropped = tuple(surface.dropped_T)
-    keep = ok & ~np.isin(np.round(quotes["T"].to_numpy(float), 12), np.round(np.asarray(dropped, float), 12))
+    keep = ok & ~np.isin(np.round(quotes["T"].to_numpy(float), 12), np.round(np.asarray(dropped, float), 12))  # independent T-match on purpose (control total 3 gate); do not replace with a surface mask (R-14 B, R-9 D1)
     assert surface.n_quotes_used == int(np.sum(keep)), \
         "control total 3 broken: n_quotes_used %d vs %d" % (surface.n_quotes_used, int(np.sum(keep)))
     print("usable quotes: %d | dropped maturities (too few quotes): %s" % (
@@ -194,7 +189,7 @@ def _run(args):
 
     report = arbitrage_report(surface)
     for line in report["lines"]:
-        print(_ascii(line))
+        print(ascii_fold(line))
 
     fig = build_dashboard(surface, quotes, params, colorscale=args.colorscale, x_axis=args.x_axis)
     path = write_dashboard(fig, args.out, plotlyjs="inline" if args.offline else "cdn")

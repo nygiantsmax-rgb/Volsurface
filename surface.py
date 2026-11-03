@@ -31,8 +31,7 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import CubicSpline, PchipInterpolator, RBFInterpolator
 
-from bs_pricing import (IV_STATUS_BRENT, IV_STATUS_NAMES, IV_STATUS_NEWTON,  # noqa: F401
-                        bs_price, implied_vol)
+from bs_pricing import IV_STATUS_USABLE, bs_price, implied_vol
 from data_io import MarketParams
 
 # --- Tunables: each is ONE named constant so a REVIEW_A ruling is a one-line edit -----------
@@ -41,7 +40,6 @@ W_FLOOR = 0.0                 # CONTRACT 6.1: w clipped to >= W_FLOOR everywhere
 K_GRID_MODE = "union"         # CONTRACT 6.3 / R3: "union" of quoted k (default) or "intersection"
 OTM_CALL_AT_BOUNDARY = True   # CONTRACT 2.2 / R2: the k == 0 quote goes to the CALL
 RBF_KERNEL = "thin_plate_spline"
-_USABLE_STATUSES = (IV_STATUS_NEWTON, IV_STATUS_BRENT)
 
 # REVIEW_A R11(c): exact text; scope is in_domain nodes only.
 DIAGNOSTIC_DISCLAIMER = ("DIAGNOSTIC ONLY: these checks count violations at grid nodes inside "
@@ -88,6 +86,16 @@ def _make_w_fn(raw_fn, T_lo, T_hi, k_lo, k_hi, clamp):
     return w_fn
 
 
+def _in_domain(T_nodes, k_lo, k_hi, T, k):
+    """THE quoted-domain rule (REVIEW_A R9/R10, R-14 A): True where T lies inside the maturity range
+    and k lies between the per-maturity quoted edges interpolated linearly in T. NaN gives False."""
+    T = np.asarray(T, dtype=np.float64)
+    k = np.asarray(k, dtype=np.float64)
+    lo = np.interp(T, T_nodes, k_lo)
+    hi = np.interp(T, T_nodes, k_hi)
+    return (T >= T_nodes[0]) & (T <= T_nodes[-1]) & (k >= lo) & (k <= hi)
+
+
 # ---------------------------------------------------------------------------
 # Surface
 # ---------------------------------------------------------------------------
@@ -101,7 +109,8 @@ class Surface:
     k_lo, k_hi, in_domain: REVIEW_A R9 governing definition. For each usable maturity T_m,
     kmin_m / kmax_m = min / max k over its status-0/1 quotes; k_lo = np.interp(T_grid, T_m,
     kmin_m), k_hi likewise; in_domain[i, j] = (k_lo[i] <= k_grid[j] <= k_hi[i]). Nodes
-    outside are EXTRAPOLATED and not reliable.
+    outside are EXTRAPOLATED and not reliable. in_domain_at(T, k) is the single definition of
+    that rule at arbitrary (T, k); the in_domain grid, smile and term_structure all use it (R-14 A).
     method "rbf" | "spline".   params MarketParams.
     n_quotes_used: usable quotes (status 0/1) that fed the interpolator.
     dropped_T: maturities removed for having < MIN_QUOTES_PER_T usable quotes.
@@ -121,6 +130,10 @@ class Surface:
     n_quotes_used: int
     dropped_T: tuple
     _w_fn: Callable = field(repr=False)
+
+    def in_domain_at(self, T, k):
+        """Quoted-domain flag at arbitrary (T, k); broadcasts; the same definition as the in_domain grid (R-14 A)."""
+        return _in_domain(self.T_grid, self.k_lo, self.k_hi, T, k)
 
     def evaluate_w(self, T, k):
         """Total variance at arbitrary (T, k). array_like inputs broadcast; float64 result
@@ -219,7 +232,7 @@ def prepare_quotes(chain, params):
     if sum(int((status == c).sum()) for c in range(5)) != len(out):
         raise RuntimeError("control total failed: status codes outside 0..4")
     # Control total 4: iv finite <=> status in {0, 1}.
-    if not np.array_equal(np.isfinite(iv), np.isin(status, _USABLE_STATUSES)):
+    if not np.array_equal(np.isfinite(iv), np.isin(status, IV_STATUS_USABLE)):
         raise RuntimeError("control total failed: iv finite does not match status in {0,1}")
     return out
 
@@ -306,7 +319,7 @@ def build_surface(quotes, params, method="rbf", n_T=60, n_k=80, smoothing=1e-6):
     if K_GRID_MODE not in ("union", "intersection"):
         raise ValueError("K_GRID_MODE must be 'union' or 'intersection'")
 
-    ok = np.isin(quotes["status"].to_numpy(), _USABLE_STATUSES)
+    ok = np.isin(quotes["status"].to_numpy(), IV_STATUS_USABLE)
     use = quotes.loc[ok]
     T_all = use["T"].to_numpy(dtype=np.float64)
     k_all = use["k"].to_numpy(dtype=np.float64)
@@ -351,7 +364,7 @@ def build_surface(quotes, params, method="rbf", n_T=60, n_k=80, smoothing=1e-6):
     T_m = np.array([g[0] for g in groups])
     k_lo_row = np.interp(T_grid, T_m, np.array([g[1][0] for g in groups]))
     k_hi_row = np.interp(T_grid, T_m, np.array([g[1][-1] for g in groups]))
-    in_domain = (k_lo_row[:, None] <= k_grid[None, :]) & (k_grid[None, :] <= k_hi_row[:, None])
+    in_domain = _in_domain(T_grid, k_lo_row, k_hi_row, T_grid[:, None], k_grid[None, :])
     if not (np.isfinite(w).all() and np.isfinite(iv).all()):
         raise ValueError("non-finite surface")
     shape = (len(T_grid), len(k_grid))
@@ -422,9 +435,11 @@ def arbitrage_report(surface, tol_calendar_w=1e-6, tol_butterfly=1e-8):
 def smile(surface, T, n_k=None):
     """IV smile at fixed T (years, any T > 0; need not be a grid node) (CONTRACT 6.5).
 
-    Columns [k, strike, iv] (float64, decimals), ascending in k. k = surface.k_grid, or
-    linspace over its range with n_k points when n_k is given (n_k >= 2). strike =
-    params.forward(T) * exp(k). ValueError for non-scalar or non-positive T.
+    Columns [k, strike, iv, in_domain] (iv float64 decimals; in_domain bool), ascending in k.
+    k = surface.k_grid, or linspace over its range with n_k points when n_k is given
+    (n_k >= 2). strike = params.forward(T) * exp(k). in_domain is False for k outside the
+    quoted range at this T and for T outside [T_grid[0], T_grid[-1]] (Surface.in_domain_at).
+    ValueError for non-scalar or non-positive T.
     """
     Ts = np.asarray(T, dtype=np.float64)
     if Ts.ndim != 0 or not np.isfinite(Ts) or Ts <= 0:
@@ -440,6 +455,7 @@ def smile(surface, T, n_k=None):
         "k": k,
         "strike": float(surface.params.forward(Tf)) * np.exp(k),
         "iv": np.asarray(surface.evaluate(Tf, k), dtype=np.float64),
+        "in_domain": surface.in_domain_at(Tf, k),
     })
 
 
@@ -449,8 +465,8 @@ def term_structure(surface, K=None):
     K given (> 0, currency units): FIXED-STRIKE curve with per-maturity
     k_i = ln(K / F(T_i)), F from params.forward (NOT a fixed row of k_grid).
     K=None: the ATM-FORWARD curve, k_i = 0 for every i (a different curve).
-    in_domain = k_lo[i] <= k_i <= k_hi[i] (REVIEW_A R10; governing definition in R9 /
-    Surface docstring); False rows are extrapolated. ValueError for K <= 0 or non-finite.
+    in_domain = Surface.in_domain_at(T_i, k_i), i.e. _in_domain (REVIEW_A R10; governing
+    definition R9 / Surface docstring); False rows are extrapolated. ValueError for K <= 0 or non-finite.
     """
     Tg = surface.T_grid
     if K is None:
@@ -461,7 +477,7 @@ def term_structure(surface, K=None):
             raise ValueError("term_structure: K must be a finite scalar > 0")
         k = np.log(float(Ks) / np.asarray(surface.params.forward(Tg), dtype=np.float64))
     iv = np.asarray(surface.evaluate(Tg, k), dtype=np.float64)
-    in_domain = (k >= surface.k_lo) & (k <= surface.k_hi)  # R10
+    in_domain = surface.in_domain_at(Tg, k)  # R10
     return pd.DataFrame({"T": Tg.copy(), "k": k, "iv": iv, "in_domain": in_domain})
 
 
@@ -491,7 +507,7 @@ def _selfcheck():
     chain = _clean_chain(p.S, p.r, p.q)
     qt = prepare_quotes(chain, p)
     assert len(qt) == len(chain) // 2, (len(qt), len(chain))
-    ok = qt["status"].isin(_USABLE_STATUSES)
+    ok = qt["status"].isin(IV_STATUS_USABLE)
     assert ok.mean() > 0.9, ok.mean()
     assert float((qt.loc[ok, "iv"] - qt.loc[ok, "sigma_true"]).abs().max()) < 1e-6
     assert (((qt["type"] == "P") & (qt["k"] < 0)) | ((qt["type"] == "C") & (qt["k"] >= 0))).all()
@@ -524,7 +540,8 @@ def _selfcheck():
         assert ts["k"].max() - ts["k"].min() > 0.01
         assert float(np.abs(ts["iv"] - term_structure(s)["iv"]).max()) > 1e-4
         sm = smile(s, 0.4)
-        assert list(sm.columns) == ["k", "strike", "iv"] and np.isfinite(sm["iv"]).all()
+        assert list(sm.columns) == ["k", "strike", "iv", "in_domain"] and np.isfinite(sm["iv"]).all()
+        assert np.array_equal(s.in_domain, s.in_domain_at(s.T_grid[:, None], s.k_grid[None, :]))
     return True
 
 
