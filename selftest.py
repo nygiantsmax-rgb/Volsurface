@@ -981,7 +981,8 @@ def c06_r13_ox2_viz_gaps_where_out_of_domain_noisy_chain():
         sm_tr = [t for t in data if str(t.name).startswith("Smile T=")]
         ensure(len(sm_tr) >= 1, "no smile traces")
         T0 = float(s.T_grid[0])
-        first = [t for t in sm_tr if abs(float(t.name.split("=")[1].rstrip("y")) - T0) < 5e-4]
+        # trace names show T in whole days ("Smile T=30d"), so match within half a day
+        first = [t for t in sm_tr if abs(float(t.name.split("=")[1].rstrip("d")) - T0 * 365.0) <= 0.5]
         ensure(len(first) == 1, "smile at T=1/12 not found")
         ys = np.asarray(first[0].y, dtype=float)
         domrow = s.in_domain[0]
@@ -1128,7 +1129,7 @@ def c07_dashboard_contract_from_fig_dict():
         ensure(np.allclose(z, 100.0 * s.iv.T, atol=1e-9), "%s: z != 100*iv.T (percent only at display; no recompute)" % x_axis)
         ensure(z.max() > 5.0, "anti-vacuity: z looks like decimals, not percent (max %.4f)" % z.max())
         x, y = arr(t["x"]).astype(float), arr(t["y"]).astype(float)
-        ensure(x.shape == (nk, nT) and np.allclose(x, s.T_grid[None, :]), "x must be T_grid broadcast, shape (n_k,n_T)")
+        ensure(x.shape == (nk, nT) and np.allclose(x, s.T_grid[None, :] * 365.0), "x must be T_grid in DAYS broadcast, shape (n_k,n_T)")
         ensure(np.allclose(y, s.k_grid[:, None]) if x_axis == "k" else np.allclose(y, s.K.T), "%s: y axis wrong" % x_axis)
         cd = arr(t["customdata"])
         ensure(cd.shape == (nk, nT, 5), "customdata shape %r != (n_k,n_T,5)" % (cd.shape,))
@@ -1136,7 +1137,7 @@ def c07_dashboard_contract_from_fig_dict():
         ensure(np.allclose(cd[..., 3].astype(float), 100.0 * s.iv.T) and np.allclose(cd[..., 4].astype(float), s.k_grid[:, None]), "customdata iv_pct / k")
         ensure(t.get("hovertemplate") == HOVER, "%s: surface hovertemplate != contract: %r" % (x_axis, t.get("hovertemplate")))
         ens = d["layout"]["scene"]
-        ensure(ens["xaxis"]["title"]["text"] == "Time to maturity (years)", "x title %r" % ens["xaxis"]["title"])
+        ensure(ens["xaxis"]["title"]["text"] == "Time to maturity (days)", "x title %r" % ens["xaxis"]["title"])
         ensure(ens["yaxis"]["title"]["text"] == ("Log-moneyness k = ln(K/F)" if x_axis == "k" else "Strike"), "y title")
         ensure(ens["zaxis"]["title"]["text"] == "Implied volatility (%)", "z title")
         mk = [t for t in data if t.get("type") == "scatter3d" and t.get("name") == "Market quotes"]

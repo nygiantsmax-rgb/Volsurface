@@ -48,10 +48,10 @@ _STRIKE_TITLE = "Strike"
 
 
 def _expiry_label(params, T):
-    """Expiry label per CONTRACT.md 5.1: valuation_date + round(T*365) days, else 'T=<T:.3f>y'."""
+    """Expiry label per CONTRACT.md 5.1: valuation_date + round(T*365) days, else 'T=<days:.0f>d'."""
     vd = getattr(params, "valuation_date", None)
     if vd is None:
-        return "T=%.3fy" % float(T)
+        return "T=%.0fd" % (float(T) * DAYS_PER_YEAR)
     return (vd + datetime.timedelta(days=int(round(float(T) * DAYS_PER_YEAR)))).isoformat()
 
 
@@ -84,7 +84,9 @@ def build_dashboard(surface, quotes, params, colorscale="Viridis", x_axis="k",
                     n_smiles=5, strike_fractions=(0.8, 0.9, 1.0, 1.1, 1.2)):
     """Build the single-figure dashboard (CONTRACT.md 7.1). Pure: writes no files.
 
-    Row 1: full-width 3D IV surface (x = T years, y = k or strike, z = IV percent) with market
+    Time to maturity is DISPLAYED in days (T * DAYS_PER_YEAR) on every axis, label and hover; all
+    inputs and computations stay in years.
+    Row 1: full-width 3D IV surface (x = T days, y = k or strike, z = IV percent) with market
     quotes overlaid as Scatter3d; hover shows Strike / Expiry / IV; dropdown switches Viridis/Plasma.
     Row 2 left: smiles at up to `n_smiles` quoted maturities (interpolated line + market markers),
     slider toggles which smile is visible. Row 2 right: term structures at fixed strikes
@@ -116,7 +118,8 @@ def build_dashboard(surface, quotes, params, colorscale="Viridis", x_axis="k",
         rows=2, cols=2,
         specs=[[{"type": "scene", "colspan": 2}, None], [{"type": "xy"}, {"type": "xy"}]],
         row_heights=[0.62, 0.38], vertical_spacing=0.08,
-        subplot_titles=("", "", "Smiles (slider selects expiry)",
+        # One title per real subplot in row-major order (scene, smiles, term); the None cell takes none.
+        subplot_titles=("", "Smiles (slider selects expiry)",
                         "Term structures (fixed strike vs ATM-forward)"),
     )
 
@@ -129,8 +132,8 @@ def build_dashboard(surface, quotes, params, colorscale="Viridis", x_axis="k",
     Z = 100.0 * np.asarray(surface.iv, float).T          # percent: display only
     Kt = np.asarray(surface.K, float).T
     Kg = np.broadcast_to(k_grid[:, None], (n_k, n_T))
-    cd = _customdata(params, Kt, X, Z, Kg)
-    fig.add_trace(go.Surface(x=X, y=Y, z=Z, customdata=cd, hovertemplate=_HOVER,
+    cd = _customdata(params, Kt, X, Z, Kg)               # customdata takes T in years
+    fig.add_trace(go.Surface(x=X * DAYS_PER_YEAR, y=Y, z=Z, customdata=cd, hovertemplate=_HOVER,
                              name="IV surface", colorscale=colorscale,
                              colorbar=dict(title=dict(text="IV (%)"), len=0.5, y=0.78),
                              showscale=True), row=1, col=1)
@@ -141,7 +144,7 @@ def build_dashboard(surface, quotes, params, colorscale="Viridis", x_axis="k",
     qk = usable["k"].to_numpy(float)
     qiv = 100.0 * usable["iv"].to_numpy(float)
     qx = qK if by_strike else qk
-    fig.add_trace(go.Scatter3d(x=qT, y=qx, z=qiv, mode="markers",
+    fig.add_trace(go.Scatter3d(x=qT * DAYS_PER_YEAR, y=qx, z=qiv, mode="markers",
                                name="Market quotes",
                                marker=dict(size=2.5, color="black", opacity=0.8),
                                customdata=_customdata(params, qK, qT, qiv, qk),
@@ -161,16 +164,17 @@ def build_dashboard(surface, quotes, params, colorscale="Viridis", x_axis="k",
         # OX-2 (R13 principle): out-of-domain smile points are NaN (gap), never an extrapolated value.
         y_smile = _masked_pct(sm)
         i_line = len(fig.data)
+        days = float(T) * DAYS_PER_YEAR
         fig.add_trace(go.Scatter(x=xs, y=y_smile, mode="lines",
-                                 name="Smile T=%.3fy" % T, visible=False,
-                                 hovertemplate="%s=%%{x:.4f}<br>IV: %%{y:.2f}%%<extra>T=%.3fy</extra>"
-                                 % (xlab, T)), row=2, col=1)
+                                 name="Smile T=%.0fd" % days, visible=False,
+                                 hovertemplate="%s=%%{x:.4f}<br>IV: %%{y:.2f}%%<extra>T=%.0fd</extra>"
+                                 % (xlab, days)), row=2, col=1)
         m = np.isclose(qT, T)
         fig.add_trace(go.Scatter(x=qx[m], y=qiv[m], mode="markers",
-                                 name="Quotes T=%.3fy" % T, visible=False,
+                                 name="Quotes T=%.0fd" % days, visible=False,
                                  marker=dict(size=6, color="black", symbol="diamond"),
-                                 hovertemplate="%s=%%{x:.4f}<br>IV: %%{y:.2f}%%<extra>market T=%.3fy</extra>"
-                                 % (xlab, T)), row=2, col=1)
+                                 hovertemplate="%s=%%{x:.4f}<br>IV: %%{y:.2f}%%<extra>market T=%.0fd</extra>"
+                                 % (xlab, days)), row=2, col=1)
         smile_trace_idx.append((i_line, i_line + 1))
 
     # ---- term structures --------------------------------------------------------------------
@@ -188,7 +192,8 @@ def build_dashboard(surface, quotes, params, colorscale="Viridis", x_axis="k",
     for T, (a, b) in zip(smile_Ts, smile_trace_idx):
         vis = list(base)
         vis[a] = vis[b] = True
-        steps.append(dict(method="restyle", args=[{"visible": vis}], label="T=%.3fy" % T))
+        steps.append(dict(method="restyle", args=[{"visible": vis}],
+                          label="%.0fd" % (float(T) * DAYS_PER_YEAR)))
     if steps:                                        # initial state = first smile shown
         for j, v in enumerate(steps[0]["args"][0]["visible"]):
             fig.data[j].visible = v
@@ -204,15 +209,17 @@ def build_dashboard(surface, quotes, params, colorscale="Viridis", x_axis="k",
 
     fig.update_layout(
         title=dict(text=TITLE),
-        scene=dict(xaxis=dict(title=dict(text="Time to maturity (years)")),
+        scene=dict(xaxis=dict(title=dict(text="Time to maturity (days)")),
                    yaxis=dict(title=dict(text=y_title)),
                    zaxis=dict(title=dict(text="Implied volatility (%)"))),
         sliders=sliders, updatemenus=updatemenus,
-        height=1000, margin=dict(l=40, r=40, t=80, b=80), legend=dict(font=dict(size=10)),
+        # Legend beside the bottom row, below the colorbar (which spans the top half), so they never overlap.
+        height=1000, margin=dict(l=40, r=40, t=80, b=80),
+        legend=dict(font=dict(size=10), x=1.02, xanchor="left", y=0.38, yanchor="top"),
     )
     fig.update_xaxes(title_text=y_title, row=2, col=1)
     fig.update_yaxes(title_text="Implied volatility (%)", row=2, col=1)
-    fig.update_xaxes(title_text="Time to maturity (years)", row=2, col=2)
+    fig.update_xaxes(title_text="Time to maturity (days)", row=2, col=2)
     fig.update_yaxes(title_text="Implied volatility (%)", row=2, col=2)
     return fig
 
@@ -223,15 +230,15 @@ def _masked_pct(df):
 
 
 def _add_term(fig, ts, name, dash=None):
-    """Add one term-structure trace (x = T years, y = IV percent); out-of-domain points are NaN, a gap in the line (R13)."""
+    """Add one term-structure trace (x = T days, y = IV percent); out-of-domain points are NaN, a gap in the line (R13)."""
     # R13: out-of-domain points are a gap in the line, never an extrapolated value presented as a market fact.
     y_pct = _masked_pct(ts)
     fig.add_trace(go.Scatter(
-        x=ts["T"].to_numpy(float), y=y_pct, mode="lines+markers",
+        x=ts["T"].to_numpy(float) * DAYS_PER_YEAR, y=y_pct, mode="lines+markers",
         name=name, line=dict(dash=dash) if dash else None,
         marker=dict(size=5),
         customdata=np.column_stack([ts["k"].to_numpy(float)]),
-        hovertemplate=("T=%{x:.3f}y<br>IV: %{y:.2f}%<br>k=%{customdata[0]:.4f}"
+        hovertemplate=("T=%{x:.0f}d<br>IV: %{y:.2f}%<br>k=%{customdata[0]:.4f}"
                        "<extra>" + name + "</extra>")),
         row=2, col=2)
 

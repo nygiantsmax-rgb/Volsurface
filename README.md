@@ -286,6 +286,11 @@ OX-2 (smile gaps) and D1, D3 to D6, D10 are recorded CLOSED in REVIEW_B section 
   `python selftest.py --hashes` and compare. A difference means the file changed after those runs. The author did
   not compute these hashes. The dashboards from run n and run n+1 were identical apart from one random Plotly div
   id per file (hub gate fact).
+- Changed after that gate (2026-11-03, display only): `viz.py` shows time to maturity in DAYS on every axis, slider
+  and label (inputs and math stay in years), gives each panel its own title, and moves the legend clear of the
+  colorbar; `selftest.py` asserts days. So `viz.py` and `selftest.py` no longer match the list above. Re-checked on
+  the new bytes: `selftest.py --only c06` and `--only c07` pass (8 checks); the full suite and the mutation proof
+  were not re-run.
 - The repo ships `.gitattributes` (`* text=auto eol=lf`) so a clone on any platform checks files out with LF and
   `python selftest.py --hashes` matches this list.
 - Mutation proof, same gate and bytes (hub gate facts): it printed `BASELINE copy: rc=0 failed=[]`, then 18 rows:
