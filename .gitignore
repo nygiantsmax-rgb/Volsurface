@@ -2,3 +2,8 @@
 /vol_surface.html
 __pycache__/
 *.pyc
+out/
+.env
+*.token
+token*.json
+schwab_*.csv
