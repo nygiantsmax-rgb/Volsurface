@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Volsurface</title>
+<meta name="description" content="Build an implied-volatility surface from an option chain and get one standalone HTML dashboard that shows where the quotes end.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #EDF0F3;
+  --paper-2: #E2E7EC;
+  --ink: #1B2430;
+  --ink-soft: #4A5562;
+  --purple: #440154;
+  --teal: #21918C;
+  --ghost: #BCC5CE;
+  --code-bg: #1B2430;
+  --code-ink: #E2E7EC;
+  --measure: 66ch;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #151C25;
+    --paper-2: #1D2631;
+    --ink: #E2E7EC;
+    --ink-soft: #A7B1BC;
+    --purple: #C9A3E0;
+    --teal: #5EC9C2;
+    --ghost: #4A5562;
+    --code-bg: #0E141B;
+    --code-ink: #E2E7EC;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #151C25; --paper-2: #1D2631; --ink: #E2E7EC; --ink-soft: #A7B1BC;
+  --purple: #C9A3E0; --teal: #5EC9C2; --ghost: #4A5562; --code-bg: #0E141B; --code-ink: #E2E7EC;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "STIX Two Text", "Cambria", "Georgia", serif;
+  font-size: 1.125rem;
+  line-height: 1.6;
+}
+a { color: var(--purple); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 3px solid var(--teal); outline-offset: 3px; border-radius: 2px; }
+code, pre { font-family: "JetBrains Mono", "Consolas", monospace; font-size: 0.86rem; }
+p code, li code { background: var(--paper-2); padding: 0.05em 0.3em; border-radius: 3px; }
+
+.wrap { width: 100%; max-width: 72rem; margin-inline: auto; padding-inline: 1rem; }
+@media (min-width: 48rem) { .wrap { padding-inline: 2rem; } }
+.hero > *, .runs > *, .steps > li, .checks > * { min-width: 0; }
+
+.top { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; justify-content: space-between; align-items: baseline; padding-block: 1.5rem; }
+.top .name { font-weight: 600; font-size: 1.125rem; color: var(--ink); text-decoration: none; }
+.top nav { display: flex; gap: 1.25rem; font-size: 1rem; }
+
+/* Hero: the surface is the one bold element on the page */
+.hero { display: grid; gap: 2rem; padding-bottom: 3.5rem; }
+@media (min-width: 60rem) { .hero { grid-template-columns: 5fr 7fr; align-items: center; gap: 3rem; } }
+.hero h1 {
+  font-weight: 400;
+  font-size: clamp(2.25rem, 1.4rem + 3.4vw, 3.75rem);
+  line-height: 1.08;
+  letter-spacing: -0.012em;
+  margin: 0 0 1.25rem;
+}
+.hero .lede { color: var(--ink-soft); max-width: 34ch; margin: 0 0 1.75rem; font-size: 1.2rem; }
+.cmd { background: var(--code-bg); color: var(--code-ink); border-radius: 6px; padding: 0.9rem 1rem; margin: 0 0 0.75rem; overflow-x: auto; }
+.cmd pre { margin: 0; }
+.hero .after { font-size: 1rem; color: var(--ink-soft); margin: 0; }
+
+.plot-frame { position: relative; }
+#surface { width: 100%; height: 26rem; }
+@media (min-width: 60rem) { #surface { height: 34rem; } }
+.plot-caption { display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; align-items: center; font-size: 0.95rem; color: var(--ink-soft); margin-top: 0.5rem; }
+.key { display: inline-flex; align-items: center; gap: 0.45rem; }
+.swatch { width: 1.6rem; height: 0.7rem; border-radius: 2px; display: inline-block; }
+.swatch.data { background: linear-gradient(90deg, #440154, #3B528B, #21918C, #5EC962, #FDE725); }
+.swatch.ghost { background: var(--ghost); }
+.dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--ink); display: inline-block; }
+.toggle { font: inherit; font-size: 0.95rem; color: var(--purple); background: none; border: 1px solid currentColor; border-radius: 4px; padding: 0.2rem 0.6rem; cursor: pointer; }
+.toggle[aria-pressed="false"] { color: var(--ink-soft); }
+.plot-fallback { display: none; padding: 2rem 1rem; color: var(--ink-soft); }
+.no-plot .plot-fallback { display: block; }
+.no-plot #surface { display: none; }
+
+section { padding-block: 3rem; }
+section + section { border-top: 1px solid var(--paper-2); }
+h2 { font-weight: 600; font-size: 1.6rem; line-height: 1.25; margin: 0 0 1.25rem; }
+.prose { max-width: var(--measure); }
+.prose p { margin: 0 0 1rem; }
+
+/* The pipeline really is a sequence, so it is numbered */
+.steps { list-style: none; margin: 0; padding: 0; counter-reset: step; display: grid; gap: 1.25rem; }
+@media (min-width: 48rem) { .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem 3rem; } }
+@media (min-width: 72rem) { .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.steps li { counter-increment: step; display: grid; grid-template-columns: 2rem 1fr; gap: 0 0.5rem; }
+.steps li::before { content: counter(step); font-size: 1.6rem; line-height: 1.1; color: var(--teal); font-style: italic; }
+.steps h3 { font-size: 1.05rem; font-weight: 600; margin: 0 0 0.25rem; }
+.steps p { margin: 0; color: var(--ink-soft); font-size: 1rem; }
+.math { font-style: italic; white-space: nowrap; }
+
+.runs { display: grid; gap: 1.5rem; max-width: 52rem; }
+.runs h3 { font-size: 1.05rem; font-weight: 600; margin: 0 0 0.4rem; }
+.runs p { margin: 0 0 0.5rem; color: var(--ink-soft); font-size: 1rem; }
+
+.limits { max-width: var(--measure); margin: 0; padding-left: 1.2rem; }
+.limits li { margin-bottom: 0.9rem; }
+.limits li::marker { color: var(--teal); }
+
+.checks { display: grid; gap: 1.75rem; max-width: 60rem; }
+@media (min-width: 48rem) { .checks { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.checks .figure { font-size: 2.25rem; line-height: 1; margin: 0 0 0.4rem; }
+.checks p { margin: 0; font-size: 1rem; color: var(--ink-soft); }
+
+footer { padding: 2rem 0 3rem; font-size: 0.95rem; color: var(--ink-soft); }
+footer p { margin: 0; max-width: var(--measure); }
+
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<header class="wrap top">
+  <a class="name" href="#">Volsurface</a>
+  <nav aria-label="Primary">
+    <a href="#run">Run it</a>
+    <a href="https://github.com/nygiantsmax-rgb/Volsurface">Source on GitHub</a>
+  </nav>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <div>
+      <h1>An implied-volatility surface that shows where the quotes end.</h1>
+      <p class="lede">Give it an option chain. It solves each quote for implied volatility, fits a surface in total variance, and writes one HTML file you can open anywhere. No server, no API key.</p>
+      <div class="cmd"><pre><code>python -m pip install -r requirements.txt
+python main.py</code></pre></div>
+      <p class="after">With no input it builds a synthetic chain, so the first run works offline in seconds.</p>
+    </div>
+
+    <figure class="plot-frame" style="margin:0">
+      <div id="surface" role="img" aria-label="3D implied-volatility surface over maturity and log-moneyness. Regions backed by quotes are coloured; extrapolated regions are pale grey."></div>
+      <p class="plot-fallback">The interactive surface needs JavaScript and a connection to load Plotly. Running <code>python main.py</code> produces the same view locally.</p>
+      <figcaption class="plot-caption">
+        <span class="key"><span class="swatch data" aria-hidden="true"></span>Backed by quotes</span>
+        <span class="key"><span class="swatch ghost" aria-hidden="true"></span>Extrapolated</span>
+        <span class="key"><span class="dot" aria-hidden="true"></span>Solved quotes</span>
+        <button class="toggle" id="ghost-toggle" type="button" aria-pressed="true">Extrapolated region shown</button>
+      </figcaption>
+    </figure>
+  </div>
+
+  <section class="wrap" aria-labelledby="h-numbers">
+    <h2 id="h-numbers">This is the default run</h2>
+    <div class="prose">
+      <p id="stats-line">The surface above comes straight from the tool's own code on its default synthetic chain: spot 100, rate 4%, dividend yield 1.5%, eight maturities from one month to two years, 5 basis points of price noise.</p>
+      <p>Most dashboards draw a smooth sheet edge to edge and leave you to guess which parts a trade ever touched. This one keeps the difference visible: in the term-structure and smile panels of the dashboard, a line simply stops where the quotes stop.</p>
+    </div>
+  </section>
+
+  <section class="wrap" aria-labelledby="h-how">
+    <h2 id="h-how">How a chain becomes a surface</h2>
+    <ol class="steps">
+      <li><div><h3>Read the chain</h3><p>Synthetic by default, or your own CSV of strike, type, price and maturity. Bad rows are set aside and counted, not fatal.</p></div></li>
+      <li><div><h3>Put every strike on one scale</h3><p>Forward <span class="math">F = S e<sup>(r&minus;q)T</sup></span>, then log-moneyness <span class="math">k = ln(K/F)</span>.</p></div></li>
+      <li><div><h3>Keep the liquid side</h3><p>Only out-of-the-money quotes: puts below the forward, calls at or above it.</p></div></li>
+      <li><div><h3>Solve for implied volatility</h3><p>Newton where vega is healthy, Brent where it is not. A quote is accepted only when the volatility itself has converged, not just the price.</p></div></li>
+      <li><div><h3>Fit in total variance</h3><p>Interpolate <span class="math">w = &sigma;&sup2;T</span> over (T, k) with a thin-plate RBF, or a spline if you ask for one, and mark which grid nodes the quotes actually cover.</p></div></li>
+      <li><div><h3>Write the dashboard</h3><p>A 3D surface plus smile and term-structure panels in a single Plotly HTML file, with calendar and butterfly checks printed alongside.</p></div></li>
+    </ol>
+  </section>
+
+  <section class="wrap" id="run" aria-labelledby="h-run">
+    <h2 id="h-run">Run it on your own data</h2>
+    <div class="runs">
+      <div>
+        <h3>Your CSV</h3>
+        <p>Columns <code>strike</code>, <code>type</code>, <code>price</code>, and either <code>T</code> in years or <code>expiry</code> with a valuation date. Rates and yields are decimals.</p>
+        <div class="cmd"><pre><code>python main.py --csv chain.csv --spot 100 --rate 0.04 --div 0.01</code></pre></div>
+      </div>
+      <div>
+        <h3>A live listed chain</h3>
+        <p>Needs <code>yfinance</code> and a network connection. It never falls back to synthetic data if the fetch fails.</p>
+        <div class="cmd"><pre><code>python main.py --ticker SYM</code></pre></div>
+      </div>
+      <div>
+        <h3>A different fit</h3>
+        <p>Spline instead of RBF, strike instead of log-moneyness on the x axis, and no browser launch.</p>
+        <div class="cmd"><pre><code>python main.py --method spline --x-axis strike --no-open</code></pre></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap" aria-labelledby="h-limits">
+    <h2 id="h-limits">What it does not claim</h2>
+    <ul class="limits">
+      <li>The calendar and butterfly checks are diagnostics. They count violations at nodes inside the quoted range; they do not make the surface arbitrage-free, and the vertical-spread bound is not checked.</li>
+      <li>The 3D surface in the generated dashboard does not label extrapolated corners. The smile and term-structure panels do show the gaps.</li>
+      <li>A live ticker run prices American-style listed options with European Black-Scholes and a flat rate and dividend yield, and says so on the console.</li>
+      <li>Rates are a single number you pass in, not a market curve.</li>
+    </ul>
+  </section>
+
+  <section class="wrap" aria-labelledby="h-checks">
+    <h2 id="h-checks">How it is checked</h2>
+    <div class="checks">
+      <div><p class="figure">40</p><p>content checks in <code>selftest.py</code>, covering pricing, the solver, the surface, the quoted domain and the dashboard file.</p></div>
+      <div><p class="figure">108</p><p>checks in <code>oracle_check.py</code>, an independent pricer and surface oracle written from the specification rather than from the code.</p></div>
+      <div><p class="figure">17 of 18</p><p>deliberate breakages must turn the suite red in the mutation proof; the eighteenth is informational. The proof refuses to run unless its baseline is green.</p></div>
+    </div>
+  </section>
+</main>
+
+<footer class="wrap">
+  <p>Volsurface is a small, readable Python tool built on numpy, scipy, pandas and Plotly. The README documents every option, exit code and known limitation. <a href="https://github.com/nygiantsmax-rgb/Volsurface">Read the source</a>.</p>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+<script>
+(function () {
+  var frame = document.querySelector(".plot-frame");
+  var toggle = document.getElementById("ghost-toggle");
+  if (!window.Plotly || !window.fetch) { frame.classList.add("no-plot"); toggle.hidden = true; return; }
+
+  function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  var VIRIDIS = [[0, "#440154"], [0.25, "#3B528B"], [0.5, "#21918C"], [0.75, "#5EC962"], [1, "#FDE725"]];
+
+  fetch("surface.json").then(function (r) {
+    if (!r.ok) throw new Error("surface.json " + r.status);
+    return r.json();
+  }).then(function (d) {
+    var s = d.stats;
+    var pct = Math.round(100 * s.in_domain / s.nodes);
+    document.getElementById("stats-line").textContent =
+      "The surface above comes straight from the tool's own code on its default synthetic chain: spot " + s.S +
+      ", rate " + (s.r * 100) + "%, dividend yield " + (s.q * 100) + "%, " + s.maturities +
+      " maturities, " + s.quotes + " solved quotes. " + s.in_domain + " of its " + s.nodes +
+      " grid nodes (" + pct + "%) sit inside the range the quotes cover; the rest is extrapolation, drawn pale.";
+
+    var ink = css("--ink"), soft = css("--ink-soft"), ghost = css("--ghost"), grid = css("--paper-2");
+    var ghostTrace = {
+      type: "surface", x: d.k, y: d.T, z: d.iv_all, name: "Extrapolated",
+      colorscale: [[0, ghost], [1, ghost]], showscale: false, opacity: 0.45,
+      hovertemplate: "k %{x:.3f}<br>T %{y:.2f}y<br>IV %{z:.1f}%<br>extrapolated<extra></extra>"
+    };
+    var dataTrace = {
+      type: "surface", x: d.k, y: d.T, z: d.iv_in, name: "Backed by quotes",
+      colorscale: VIRIDIS, showscale: false,
+      hovertemplate: "k %{x:.3f}<br>T %{y:.2f}y<br>IV %{z:.1f}%<extra></extra>"
+    };
+    var quoteTrace = {
+      type: "scatter3d", mode: "markers", x: d.quotes.k, y: d.quotes.T, z: d.quotes.iv, name: "Solved quotes",
+      marker: { size: 2.2, color: ink },
+      hovertemplate: "quote<br>k %{x:.3f}<br>T %{y:.2f}y<br>IV %{z:.1f}%<extra></extra>"
+    };
+    var axis = function (title) {
+      return { title: { text: title, font: { color: soft, size: 13 } }, tickfont: { color: soft, size: 11 },
+               gridcolor: grid, zerolinecolor: grid, backgroundcolor: "rgba(0,0,0,0)", showbackground: false };
+    };
+    var layout = {
+      margin: { l: 10, r: 10, t: 0, b: 0 }, paper_bgcolor: "rgba(0,0,0,0)", showlegend: false,
+      font: { family: "STIX Two Text, Georgia, serif" },
+      scene: {
+        xaxis: axis("log-moneyness k"), yaxis: axis("maturity T (years)"), zaxis: axis("implied vol (%)"),
+        camera: { eye: { x: 1.7, y: -1.35, z: 0.45 }, center: { x: 0, y: 0, z: -0.12 } },
+        aspectmode: "manual", aspectratio: { x: 1.3, y: 1.05, z: 0.95 }
+      }
+    };
+    Plotly.newPlot("surface", [ghostTrace, dataTrace, quoteTrace], layout,
+      { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["toImage", "resetCameraLastSave3d"] });
+
+    toggle.addEventListener("click", function () {
+      var on = toggle.getAttribute("aria-pressed") !== "true";
+      toggle.setAttribute("aria-pressed", on ? "true" : "false");
+      toggle.textContent = on ? "Extrapolated region shown" : "Extrapolated region hidden";
+      Plotly.restyle("surface", { visible: on }, [0]);
+    });
+  }).catch(function () { frame.classList.add("no-plot"); toggle.hidden = true; });
+})();
+</script>
+</body>
+</html>
