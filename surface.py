@@ -109,7 +109,8 @@ class Surface:
     k_lo, k_hi, in_domain: REVIEW_A R9 governing definition. For each usable maturity T_m,
     kmin_m / kmax_m = min / max k over its status-0/1 quotes; k_lo = np.interp(T_grid, T_m,
     kmin_m), k_hi likewise; in_domain[i, j] = (k_lo[i] <= k_grid[j] <= k_hi[i]). Nodes
-    outside are EXTRAPOLATED and not reliable. in_domain_at(T, k) is the single definition of
+    outside are EXTRAPOLATED and not reliable. T_m, kmin_m, kmax_m keep the quoted maturities
+    and edges so in_domain_at is exact at a quoted T (R-15 D14). in_domain_at(T, k) is the single definition of
     that rule at arbitrary (T, k); the in_domain grid, smile and term_structure all use it (R-14 A).
     method "rbf" | "spline".   params MarketParams.
     n_quotes_used: usable quotes (status 0/1) that fed the interpolator.
@@ -129,11 +130,14 @@ class Surface:
     params: MarketParams
     n_quotes_used: int
     dropped_T: tuple
+    T_m: np.ndarray       # (n_m,) quoted maturities that fed the surface (R-15 D14)
+    kmin_m: np.ndarray    # (n_m,) min k over each maturity's status-0/1 quotes (REVIEW_A R9)
+    kmax_m: np.ndarray    # (n_m,) max k over each maturity's status-0/1 quotes (REVIEW_A R9)
     _w_fn: Callable = field(repr=False)
 
     def in_domain_at(self, T, k):
-        """Quoted-domain flag at arbitrary (T, k); broadcasts; the same definition as the in_domain grid (R-14 A)."""
-        return _in_domain(self.T_grid, self.k_lo, self.k_hi, T, k)
+        """Quoted-domain flag at arbitrary (T, k); broadcasts. Edges are interpolated over the QUOTED maturities, so at a quoted T this is the slice's exact quoted extent; at grid nodes it equals the in_domain grid bit-for-bit (R-14 A, R-15 D14)."""
+        return _in_domain(self.T_m, self.kmin_m, self.kmax_m, T, k)
 
     def evaluate_w(self, T, k):
         """Total variance at arbitrary (T, k). array_like inputs broadcast; float64 result
@@ -362,8 +366,10 @@ def build_surface(quotes, params, method="rbf", n_T=60, n_k=80, smoothing=1e-6):
     K = F[:, None] * np.exp(k_grid[None, :])
     # REVIEW_A R9 (union grid kept; R21): per-row quoted domain, interpolated in T.
     T_m = np.array([g[0] for g in groups])
-    k_lo_row = np.interp(T_grid, T_m, np.array([g[1][0] for g in groups]))
-    k_hi_row = np.interp(T_grid, T_m, np.array([g[1][-1] for g in groups]))
+    kmin_m = np.array([g[1][0] for g in groups])
+    kmax_m = np.array([g[1][-1] for g in groups])
+    k_lo_row = np.interp(T_grid, T_m, kmin_m)
+    k_hi_row = np.interp(T_grid, T_m, kmax_m)
     in_domain = _in_domain(T_grid, k_lo_row, k_hi_row, T_grid[:, None], k_grid[None, :])
     if not (np.isfinite(w).all() and np.isfinite(iv).all()):
         raise ValueError("non-finite surface")
@@ -377,7 +383,8 @@ def build_surface(quotes, params, method="rbf", n_T=60, n_k=80, smoothing=1e-6):
     if n_used != expect_used:
         raise RuntimeError("control total failed: n_quotes_used %d != %d" % (n_used, expect_used))
     return Surface(T_grid=T_grid, k_grid=k_grid, w=w, iv=iv, F=F, K=K, k_lo=k_lo_row,
-                   k_hi=k_hi_row, in_domain=in_domain, method=method, params=params, n_quotes_used=n_used, dropped_T=dropped_T, _w_fn=w_fn)
+                   k_hi=k_hi_row, in_domain=in_domain, method=method, params=params, n_quotes_used=n_used, dropped_T=dropped_T,
+                   T_m=T_m, kmin_m=kmin_m, kmax_m=kmax_m, _w_fn=w_fn)
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +549,7 @@ def _selfcheck():
         sm = smile(s, 0.4)
         assert list(sm.columns) == ["k", "strike", "iv", "in_domain"] and np.isfinite(sm["iv"]).all()
         assert np.array_equal(s.in_domain, s.in_domain_at(s.T_grid[:, None], s.k_grid[None, :]))
+        assert np.array_equal(s.in_domain_at(s.T_m, s.kmin_m), np.ones(len(s.T_m), bool)) and np.array_equal(s.in_domain_at(s.T_m, s.kmax_m), np.ones(len(s.T_m), bool))
     return True
 
 

@@ -1008,22 +1008,34 @@ def c06_smile_slice():
 
 @check
 def c06_in_domain_single_definition():
-    """R-14 A / REVIEW_B D13: ONE quoted-domain rule serves the in_domain grid, smile and term_structure,
-    on-grid AND off-grid. Order is deliberate: noisy chain first (it carries the anti-vacuity), and the
-    off-grid smile part [c-*] before the on-grid part [b], so a smile mask that ignores the domain is
-    caught by the off-grid noisy anti-vacuity [c-av] first. Every message carries a [tag]."""
+    """R-14 A / REVIEW_B D13, R-15 D14/D15: ONE quoted-domain rule serves the in_domain grid, smile and
+    term_structure, on-grid AND off-grid. The expectation is recomputed from the QUOTES (REVIEW_A R9:
+    min/max k per usable maturity, status (0, 1) per CONTRACT 2.3, interpolated over the quoted T), never
+    from the Surface edge fields (k_lo, k_hi, T_m, kmin_m, kmax_m). Order is deliberate: noisy chain first
+    (it carries the anti-vacuity), tags run [c-*] [c-q] [a] [b] [d] [e], so a smile mask that ignores the
+    domain is caught by the off-grid noisy anti-vacuity [c-av] first. [c-q] asserts the exact quoted extent
+    at every quoted T; [c-qav] asserts the pre-D14 grid-row chord differs from it somewhere, so [c-q] can
+    fail. Every message carries a [tag]."""
     bsp, syn, dio, srf, viz = imp()
     cases = []
     for label, setup in (("noisy", noisy_setup), ("clean", clean_setup)):
         chain, params, quotes = setup()
         for method in ("rbf", "spline"):
             s = clean_surface(method) if label == "clean" else srf.build_surface(quotes, params, method=method)
-            cases.append((label, method, params, s))
-    for label, method, params, s in cases:
+            cases.append((label, method, params, s, quotes))
+    for label, method, params, s, quotes in cases:
         tag = "%s %s" % (method, label)
         noisy = label == "noisy"
         T_lo, T_hi = float(s.T_grid[0]), float(s.T_grid[-1])
-        # c. off-grid smiles vs the test's OWN recomputation from the REVIEW_A R9 text
+        # R9 truth from the QUOTES, independent of every Surface edge field; the literal (0, 1) is CONTRACT 2.3
+        use = quotes[quotes["status"].isin((0, 1))]
+        grp = use.groupby("T")["k"].agg(["min", "max", "size"])
+        grp = grp[grp["size"] >= srf.MIN_QUOTES_PER_T].sort_index()
+        Tq = grp.index.to_numpy(float)
+        kmin_q, kmax_q = grp["min"].to_numpy(float), grp["max"].to_numpy(float)
+        ensure(len(Tq) >= 2 and float(Tq[0]) == T_lo and float(Tq[-1]) == T_hi,
+               "[c-qT %s] quoted maturities %r do not span the T grid [%r, %r]" % (tag, list(Tq), T_lo, T_hi))
+        # c. off-grid smiles vs R9 recomputed from the QUOTES (min/max k per usable maturity, interpolated over the quoted T)
         sms = []
         for T in (0.2, 0.37, 0.5):
             ensure(T_lo < T < T_hi and float(np.min(np.abs(s.T_grid - T))) > 1e-6,
@@ -1036,11 +1048,24 @@ def c06_in_domain_single_definition():
                    "[c-av %s] no off-grid smile (T=0.2, 0.37, 0.5) has an out-of-domain point: the off-grid mask is untested or forced True" % tag)
         for T, sm in sms:
             k = sm["k"].to_numpy(float)
-            own = (k >= np.interp(T, s.T_grid, s.k_lo)) & (k <= np.interp(T, s.T_grid, s.k_hi))
+            own = (k >= np.interp(T, Tq, kmin_q)) & (k <= np.interp(T, Tq, kmax_q))
             dom = sm["in_domain"].to_numpy(bool)
-            ensure(np.array_equal(own, dom), "[c-eq %s T=%r] smile in_domain != own R9 recomputation at %d of %d k" % (tag, T, int((own != dom).sum()), len(k)))
+            ensure(np.array_equal(own, dom), "[c-eq %s T=%r] smile in_domain != own R9-from-quotes recomputation at %d of %d k" % (tag, T, int((own != dom).sum()), len(k)))
             at = np.asarray(s.in_domain_at(T, k), dtype=bool)
-            ensure(np.array_equal(own, at), "[c-at %s T=%r] in_domain_at != own R9 recomputation at %d of %d k" % (tag, T, int((own != at).sum()), len(k)))
+            ensure(np.array_equal(own, at), "[c-at %s T=%r] in_domain_at != own R9-from-quotes recomputation at %d of %d k" % (tag, T, int((own != at).sum()), len(k)))
+        # c-q. at every quoted maturity the mask is that slice's EXACT quoted extent (R-15 D14; no interpolation)
+        n_chord = 0
+        for T, kmin_T, kmax_T in zip(Tq, kmin_q, kmax_q):
+            sm = srf.smile(s, float(T))
+            kk = sm["k"].to_numpy(float)
+            exact = (kk >= kmin_T) & (kk <= kmax_T)
+            dom = sm["in_domain"].to_numpy(bool)
+            ensure(np.array_equal(exact, dom), "[c-q %s T=%r] smile in_domain != the slice's exact quoted extent at %d of %d k" % (tag, float(T), int((exact != dom).sum()), len(kk)))
+            at = np.asarray(s.in_domain_at(float(T), kk), dtype=bool)
+            ensure(np.array_equal(exact, at), "[c-q %s T=%r] in_domain_at != the slice's exact quoted extent at %d of %d k" % (tag, float(T), int((exact != at).sum()), len(kk)))
+            chord = (kk >= np.interp(T, s.T_grid, s.k_lo)) & (kk <= np.interp(T, s.T_grid, s.k_hi))   # the pre-D14 rule
+            n_chord += int(not np.array_equal(chord, exact))
+        ensure(n_chord > 0, "[c-qav %s] the grid-row chord equals the exact extent at all %d quoted T: [c-q] cannot tell them apart" % (tag, len(Tq)))
         # a. the grid mask is the same definition at the nodes
         ensure(np.array_equal(s.in_domain, s.in_domain_at(s.T_grid[:, None], s.k_grid[None, :])), "[a-eq %s] in_domain grid != in_domain_at(T_grid, k_grid)" % tag)
         if noisy:
@@ -1334,6 +1359,8 @@ MUTATION_TABLE = [
     ("viz_masked_pct_helper_mask_removed", "viz.py", r"return np\.where\(df\[\"in_domain\"\]\.to_numpy\(bool\), 100\.0 \* df\[\"iv\"\]\.to_numpy\(float\), np\.nan\)", "return 100.0 * df[\"iv\"].to_numpy(float)",
      ["c06_r13_ox2_viz_gaps_where_out_of_domain_noisy_chain"]),
     ("smile_in_domain_column_all_true", "surface.py", r"\"in_domain\": surface\.in_domain_at\(Tf, k\),", "\"in_domain\": np.ones(len(k), bool),",
+     ["c06_in_domain_single_definition"]),
+    ("in_domain_at_grid_chord", "surface.py", r"return _in_domain\(self\.T_m, self\.kmin_m, self\.kmax_m, T, k\)", "return _in_domain(self.T_grid, self.k_lo, self.k_hi, T, k)",
      ["c06_in_domain_single_definition"]),
     ("hover_drops_expiry", "viz.py", r"<br>Expiry: %\{customdata\[2\]\}", "<br>Exp: %{customdata[2]}",
      ["c07_dashboard_contract_from_fig_dict", "c07_write_dashboard_file"]),

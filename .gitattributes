@@ -1,0 +1,2 @@
+# Line endings: LF in the working tree on every platform, so selftest.py --hashes matches README section 8 (R-15).
+* text=auto eol=lf
